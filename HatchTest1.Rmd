@@ -1,0 +1,449 @@
+---
+title: "Hatch Test 1"
+author: "Kirsten Zimbardi"
+date: "21 June 2016"
+output:
+  html_document:
+    highlight: tango
+    theme: united
+  pdf_document: default
+---
+<style type="text/css">
+p {
+  color: black
+}
+.answer {
+  color: red
+}
+.rationale {
+  color: blue
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F)
+#clean workspace
+rm(list=ls())
+
+require(lubridate)
+require(zoo)
+require(caTools)
+require(e1071)
+require(neuralnet)
+require(rpart)
+
+#path = "/Users/KirstenZ/Dropbox/UQ/FeedbackAnalytics/MachineLearningSandbox/" #MacAir
+path = "/Users/zimbardi/Dropbox/UQ/FeedbackAnalytics/MachineLearningSandbox/" #iMac
+source(paste0(path, "HelperFunctionsMachineLearning.R"))
+
+
+```
+
+# Problem statement
+
+## Background
+You are looking at the data coming from a pump in a processing plant. Downtime can cost >$50k per hour.  
+
+## Current situation  
+* Planned maintenance on the pumps is based on throughput, condition monitoring, power drawn, pump speed, forecast wear rates, and resource availability.  
+* Shutdowns for planned maintenance are time-consuming to plan, plus costly and time-consuming to carry out.  
+* If additional items are found in the shutdown to require replacement or fixing, this results in extensions to the shutdown time & lost revenue.  
+* Unplanned breakdowns still occur and costs the Processing Plant (>$50k/hr)  
+
+## Ideal situation  
+* History of all cyclone pump failures analyzed and root causes diagnosed.  
+* Leading indicators or trends for failures identified  
+* From the above analysis, the Plant can drive the preventative maintenance schedule and hence reduced time & costs.  
+* Unplanned maintenance eliminated.  
+* Throughput and recovery maximized.  
+
+
+load data
+```{r}
+maintenance = read.csv("Maintenance_data.csv", stringsAsFactors = F)
+ops = read.csv("Operational_data.csv", stringsAsFactors = F)
+
+```
+
+## Question 1  
+From the maintenance log, can you infer how long one maintenance shift is? 
+```{r}
+names(maintenance)
+maintenance[,2]
+maintenance[1:5,]
+which(maintenance[,2] > (12*60))
+
+```
+<span class="answer"> 
+12 hours - starting at 6am and 6pm each day
+</span> 
+  
+## Question 2  
+How will you determine how many unique maintenance events?  
+<span class="rationale">
+Number of rows where previous row Start.time + Actual.Mins is not equal to that row's Start.time, and the comment changed ie:  
+</span>   
+```{r}
+
+maintenance$Start = as.POSIXct(paste(maintenance$Start.date, maintenance$Start.time), format = "%d/%m/%Y %H:%M")
+maintenance$Actual.Mins = dminutes(maintenance$Actual.Mins)
+actual.mins = maintenance$Actual.Mins
+
+
+some.dup = maintenance[-which(duplicated(maintenance[,3:6])),]
+df2 = some.dup[order(-some.dup$Actual.Mins),]
+df3 = df2[-which(duplicated(df2$Start)),]
+length(which(duplicated(df3$Start)))
+m.raw = maintenance
+maintenance = df3[order(df3$Start),]
+
+maintenance$Old.Event = FALSE
+
+for(i in 2:nrow(maintenance)) {
+  maintenance$Old.Event[i] = ((maintenance$Start[(i-1)] + maintenance$Actual.Mins[i-1]) == maintenance$Start[i]) & (maintenance$Comment[i-1] == maintenance$Comment[i])
+}
+
+addmargins(table(maintenance$Old.Event))
+
+
+```
+
+<span class="answer">  
+So, of the 79 maintenance log events, 14 were continuations of a previous maintenance event and 65 were unique events
+However, when the maintenance log was cleaned to remove all of the duplicate entries, of the 43 unique maintenance entries, 13 were continuations of a previous maintenance event and 30 were unique events
+</span>  
+
+## Question 3  
+To build a predictive maintenance algorithms, what should you focus on, unplanned or planned maintenance?  
+```{r}
+with(maintenance, addmargins(table(Type.of.maintenance, Old.Event)))
+
+with(maintenance, round(tapply(Actual.Mins, Type.of.maintenance, sum)/(60*60),1))
+
+```
+
+<span class="answer">
+Problem stated that the costs for planned and unplanned are both >50k/hr, however there were many more unplanned than planned events and the unplanned events accounted for 323 hours (184 hours in the cleaned data) compared with only 76 hours (41 hours in the cleaned data) for the planned events. Therefore the unplanned events appear to be much more costly.   
+Plus the original project brief was to improve planned maintenance (ie add n preventative maintenance) to reduce the occurance of unplanned maintenance.   
+So, it would be better to use the unplanned events when training/developing the algorithms.  
+</span>  
+
+## Question 4  
+How many measurements are taken a day? 
+```{r}
+
+ops$date.time = as.POSIXct(paste(ops$Date, ops$Time), format = "%d/%m/%Y %I:%M:%S %p")
+
+head(diff(ops$date.time))
+table(diff(ops$date.time))
+
+head(table(ops$Date))
+table(table(ops$Date))
+
+```
+<span class="answer">  
+Measurements are taken every 3 minutes, resulting in 480 measurements most days (NB there are 13 days on which only 1 measurement was taken).  
+</span>  
+
+## Question 5  
+Where are many rows with 0 in the operational data, what does that mean? 
+```{r}
+ops = ops[1:(nrow(ops) - 2),]
+
+for (i in 3:ncol(ops)) {
+  print(names(ops)[i])
+  print(paste("0s:", length(which(ops[,i] == 0))))
+  print(paste("Negatives:", length(which(ops[,i] < 0))))
+  print("---")
+}
+
+```
+<span class="answer"> 
+All of the 825 0s are in the Power measurements, although there are an additional 8273 negative readings for Power and 60 negative readings for Pressure.   
+For Pressure - the negative values might actually mean negative pressure or could be errors - need to check with client/pump technician.  
+For Power - both the 0s and the negative values seem weird since this pump should draw power (not generate it), also seems odd that 0 power not associated with 0 current, flow etc - you would think that if the pump was off (not drawing power) that the flow would also stop. Again, would need to check with client/technician to determine what these unexpected values might mean and whether they need to be cleaned out of the data before running through the algorithms.  
+NB - the last 2 rows of the operational data were missing all values - should check why, but assuming for now that this was just an issue with saving/extracting at the time it was exported, I have removed the rows for later analysis.   
+</span>  
+
+## Question 6  
+How would you approach this problem, give some possible solutions? What domain experts will you consult?  
+<span class="rationale"> 
+*First need to wrangle data*  
+<OL>
+<LI>Merge data tables together so that the measurements in the operations log are lined up with the timing of the outages in the maintenance log  
+<LI>Swell out the maintenance types and comments to cover the entire duration of each outage  
+<LI>Add labels to the measurements for 3 hour before an outage  
+<UL>
+<LI>NB would need to check with client if 3 hours is enough time to 'plan' preventative maintenance   
+</UL>
+<LI>Remove remaining NAs  
+<span class="rationale">
+<LI>Reduce down to 3 hours before the unplanned outages and 'working'   
+</span>  
+
+```{r}
+# Merging the 2 time series using zoo package  
+##NOTE this causes some additional work to re-clean, have hacked a solution here but sure a more elegant script is possible
+dfm = maintenance[,c(6,1:5)]
+dfo = ops[,c(8,1:7)]
+
+write.csv(dfm, "dfm.csv", row.names = F)
+write.csv(dfo, "dfo.csv", row.names = F)
+
+dfm1 <- read.zoo(read.csv(file = "dfm.csv", header = TRUE))
+dfo1 <- read.zoo(read.csv(file = "dfo.csv", header = TRUE))
+
+dfo2 <- merge.zoo(dfo1, dfm1)
+
+# Fixing the data - ie cleaning out issues embedded by zoo, converting data classes back to what they should be
+df = as.data.frame(dfo2, stringsAsFactors = FALSE)
+
+for(j in 1:10) {
+  df[,j] = as.character(df[,j])
+}
+
+a = which(!is.na(df$Actual.Mins))
+for(i in a) {
+  df$Actual.Mins[i] = strsplit(df$Actual.Mins[i], "s")[[1]][1]
+}
+df$Actual.Mins[-a] = 0
+df$Actual.Mins = dseconds(df$Actual.Mins)
+
+for(i in c(3:7)) {
+  df[,i] = as.numeric(df[,i])
+}
+
+df$date.time = as.POSIXct(row.names(df))
+
+# Swelling maintenance events so the label covers the entire duration of the maintenance event 
+
+b = df$date.time[a] + df$Actual.Mins[a]
+c = NULL
+for(i in 1:length(b)) {
+  c[[i]] = which(df$date.time > df$date.time[a[i]] & df$date.time < b[i])
+}
+
+df$outage.type = as.character("none")
+df$outage.comment = as.character("none")
+for(l in 1:length(c)) {
+  for(i in 1:length(c[[l]])) {
+    df$outage.type[a[l]] = as.character(df$Type.of.maintenance[a[l]])
+    df$outage.type[c[[l]][i]] = as.character(df$Type.of.maintenance[a[l]])
+    df$outage.comment[a[l]] = as.character(df$Comment[a[l]])
+    df$outage.comment[c[[l]][i]] = as.character(df$Comment[a[l]])
+  }
+}
+
+# Labelling the data for the 3 hours prior to each new maintenance event
+
+e = NULL
+for(i in 1:length(b)) {
+  e[[i]] = which(df$outage.type == "none" & df$date.time < b[i] & df$date.time >= (b[i]-(3*60*60)))
+}
+for(l in 1:length(e)) {
+  for(i in 1:length(e[[l]])) {
+    df$outage.type[e[[l]][i]] = paste("3 hours or less before", as.character(df$Type.of.maintenance[a[l]]))
+    df$outage.comment[e[[l]][i]] = paste("3 hours or less before", as.character(df$Comment[a[l]]))
+  }
+}
+
+# Removing NAs
+rownames(df) = 1:nrow(df)
+df = df[,c(13,3:7,14:15)]
+df = df[-which(is.na(df$Power)),]
+
+# Converting to logistic outcome
+df$y = ifelse(df$outage.type == "3 hours or less before Unplanned", 1, 0)
+
+```
+
+<span class="rationale">  
+**Then need to reduce data down to a subset**   
+This means the data can be run through machine learning algorithms quickly, and balances the data a little better to improve the accuracy of the algorithms' predictions (more details later).  
+<span class="rationale">
+**Also useful to visualise data**  
+<span class="rationale">
+Wise to pause at this stage to check data for ranges and visible patterns (since there are only ~4 variables,  this is relatively easy). 
+<span class="rationale">
+The following graphs may also be useful in discussion data patterns with client/technical experts.  
+
+```{r}
+
+# split data into normal 'working', during 'unplanned' outage and 3 hours before unplanned outage so 'working' data can be reduced and each set can be visualised seperately for comparison (there are more elegant ways to do this but this script is a working mock up for now)
+df.outages = df[which(df$outage.type == "Unplanned"),]
+df.outages.3b4 = df[which(df$outage.type == "3 hours or less before Unplanned"),]
+df.working = df[which(df$outage.comment == "none"),]
+df.work = df.working[seq(1, nrow(df.working),100) , ]
+df.work2 = df.work[seq(1, nrow(df.work),5) , ]
+df.small = rbind(df.work2, df.outages.3b4)
+
+# quick visualisations - histograms
+par(mfrow = c(3, 2))
+plot(0,0,type="n",axes=FALSE,main="Working", xlab="", ylab="")
+for(i in 2:6) {
+  hist(df.work[,i], main = names(df.work)[i], xlab = names(df.work)[i])
+}
+
+par(mfrow = c(3, 2))
+plot(0,0,type="n",axes=FALSE,main="During unplanned maintenance", xlab="", ylab="")
+for(i in 2:6) {
+  hist(df.outages[,i], main = names(df.outages)[i], xlab = names(df.outages)[i])
+}
+
+
+par(mfrow = c(3, 2))
+plot(0,0,type="n",axes=FALSE,main="3 hours before unplanned maintenance", xlab="", ylab="")
+for(i in 2:6) {
+  hist(df.outages.3b4[,i], main = names(df.outages.3b4)[i], xlab = names(df.outages.3b4)[i])
+}
+
+# quick visualisations - correlations
+plot(df.work[,2:6], main="Working")
+plot(df.outages[,2:6], main="During unplanned maintenance")
+plot(df.outages.3b4[,2:6], main="3 hours before unplanned maintenance")
+
+```
+
+<span class="rationale">
+*Then try a few machine learning algorithms to see what sort of prediction accuracy we can get*  
+<span class="rationale">
+<OL>
+<LI>Convert outcome (working or 3 hr prior to outage) to logistic  
+<UL>
+<LI>Simplifies initial runs of machine learning algorithms, more complex classifiaction schemes for specific types of unplanned maintenance may be desired by client and possible if the type of outage is frequent and we have sufficient data  
+</UL>
+<LI>Split data into training and test sets</span>  
+<LI>Try SVM  
+<UL>
+<LI>Check whether this is an acceptable level of accuracy etc with client eg check how differently they weight false positives vs false negatives (both >50k/hr but likely to have very different durations).  
+</UL>
+<LI>Try neural net   
+<UL>
+<LI>Check accuracy etc...
+</UL>
+</OL>
+<span class="rationale">
+### Support Vector Machine  
+```{r}
+# Run machine learning (e.g Support Vector Machine)
+
+split = sample.split(df.small$outage.comment, SplitRatio = (60/100))
+df.train = subset(df.small, split==TRUE)
+df.test = subset(df.small, split==FALSE)
+
+df.train = df.train[,c(1:6,9)]
+
+svmfit <- svm(y ~., data=df.train)
+print(svmfit)
+
+# check accuracy on test data set (for a small range of thresholds around the mode)
+p <- predict(svmfit, df.test[,c(1:6,9)])
+df.test$y = as.logical(df.test$y)
+p.value = c(0.45, 0.5, 0.55)
+for(i in 1:length(p.value)) {
+  df.test$p = as.logical(p > p.value[i])
+  cm = as.data.frame.matrix(addmargins(with(df.test, table(y, p))))
+  print(paste("Threshold set to", p.value[i]))
+  print(cm)
+  cmStats = conMatrixStats(cm) 
+  print(cmStats)
+}
+```
+
+### Neural Network  
+```{r}
+# Try neural net for comparison  
+# first need to mean normalise parameters - can probably do this using the scale function in the stats package, but I'll just hack the old fashioned version for now
+df.small.nn = df.small
+for(j in 2:6){
+  df.small.nn[,j] = (df.small.nn[1:10,j] - mean(df.small[,j]))/(max(df.small[,j]) - min(df.small[,j]))
+}
+
+# split data into training and test sets again
+split = sample.split(df.small.nn$outage.comment, SplitRatio = (60/100))
+df.train = subset(df.small.nn, split==TRUE)
+df.test = subset(df.small.nn, split==FALSE)
+
+df.train = df.train[,c(1:6,9)]
+
+n <- names(df.train)
+f = "y ~ "
+for(i in 2:6) {
+  f <- paste(f, "+", paste(n[i]))
+}
+
+# Train neural net
+nn <- neuralnet(y ~  + Power + Current + Pressure + Flow + Density, data=df.train, hidden=c(20,20,20,20), linear.output=F)
+plot(nn)
+
+# check accuracy on test data set (again using a small range of thresholds around the mode)
+p.nn = compute(nn,df.test[,c(2:6)])
+hist(p.nn$net.result)
+df.test$p = as.logical(p.nn$net.result > 0.475)
+df.test$y = as.logical(df.test$y)
+p.value = c(0.45, 0.475, 0.5)
+for(i in 1:length(p.value)) {
+  df.test$p = as.logical(p.nn$net.result > p.value[i])
+  cm = as.data.frame.matrix(addmargins(with(df.test, table(y, p))))
+  print(paste("Threshold set to", p.value[i]))
+  print(cm)
+  cmStats = conMatrixStats(cm) 
+  print(cmStats)
+}
+
+```
+
+<span class="rationale"> 
+SVM prediction accuracy comes in around 65-80% (varies depending on random split of data into training and test sets). Correctly identifies ~60-70% of cases in which unplanned maintenance was going to occur (precision ie proportion of cases of unplanned maintenance that were correctly identified), but this means it also misses 30-40% of the unplanned maintenance events. Also has a reasonably high (~30-45%) rate of alerting when there really isn't an issue (ie false positives - which would cost >50k/hr but might be relatively short if the check could be quick - would need to confirm with client/technician). NOTE that for this run, I reduced the 'working' data down to 2% of what was available for 2 reasons:   
+<span class="rationale">
+<OL>
+<LI>This helped drive the SVM to predict maintenance events ie if positives account for only 2% of the data, then models which always predict negatives appear to be a good fit for the data to the cost/error optimisation algorithm. This seemed to be the case when I ran this full data through SVM.  
+<LI><span class="rationale">Running SVM on nearly 200,000 rows of data on my little iMac took ages (longer than going to make a coffee) so it was more feasible to work up a solution on a subset of the data.  
+<span class="rationale">
+The implication is that the 30-40% false positive rate here is likely to be a gross overestimate and using more 'negative' data rows (ie when the pump was working) would likely drop this particular error rate.  
+
+<span class="rationale">
+In contrast, the neural network had a poor accuracy (~45%) regardless of the number of hidden layers (tried 2-4 layers) and the number of hidden units in each layer (tried 7-20). NB the rule of thumb is to use a few more units in each layer as there are parameters in the dataset (5 in this case) and generally you start with the same number of units in each layer. In general, the more layers and more units your neural net has, the better it will perform - but I have seen it do much better on fewer observations (rows) albeit with more parameters (typically 400). At this stage it looks like SVM outperforms neural network, and there are certainly additional ways to optimised the SVM based on the client's needs - but you get how I would approach this problem.  
+
+<span class="rationale">
+There are a couple additional caveates to check that I have learnt through experience - implementation testing is crucial. We would need to determine how this data might feed into a script like this - which includes cleaning, evaluation and preditcting the outcome ie whether preventative maintenance is recommended or not. For example, parts of this script need to be generalised depending on what aspects of the data change (number/type of measurement parameters). The processes for exporting, importing, and then alerting in real time need to be worked through (discussed with client, designed, tested, optimised). Final 'success' (ie achieving the Ideal Situation') needs to be monitored and the process/scripts/algorithms optmised as needed.
+  
+
+## Question 7  
+What possible problems do you think can exist in a dataset like this? 
+```{r}
+maintenance$Type.of.maintenance = as.factor(maintenance$Type.of.maintenance)
+maintenance$Comment = as.factor(maintenance$Comment)
+
+summary(maintenance)
+summary(ops)
+
+ops = ops[1:(nrow(ops) - 2),]
+
+ops[which.min(ops$Pressure),]
+head(ops[which(ops$Pressure < 0),])
+head(ops[which(ops$Pressure == 0),])
+
+head(ops[which(ops$Power < 0),])
+head(ops[which(ops$Power == 0),])
+
+```
+
+<span class="rationale">
+For the maintenance data:
+'Comments' field might not be standardised (ie different technicians may use different terms for same issue) or could have simple typo's  
+<span class="rationale">
+One maintenance event may involve more than one problem
+**Duplicate entries - the biggest problem I faced with this data set were the duplicate entries for maintenance events - where all parameters were equal except for the "Actual.Mins" ie outage duration. I had to remove these (keeping the longest duration entry) before I could join the maintenance and operations data together.
+
+<span class="rationale">
+For the operational data:
+Missing values ie there were 12 N/As (ie values missing completely) although these were the last 2 rows of data so easy enough to check with company and trim out.  
+<span class="rationale">
+As noted above, there are a lot of very small, 0 and negative values for the parameters that seem odd, to me at least. The graphs above would be a good way to sit down with clients and experts to workthrough what those values mean for each parameter and whether they are important indicators or need to be removed. For example, both the histograms and panels of correlations identify small clusters of very small values, and these are present when the pump appears to be working fine, during maintenance and in the 3 hours leading up to an unplanned maintenance event - what do these clusters represent? Are they important or should they be removed?  
+<span class="rationale">
+Diverse ranges for the different parameters eg Power ranges from 0-6000 while Current ranges from 0-80. This is fine, but needs to be mean normalised for some learning algorithms (eg nural networks)
+
+
+
+

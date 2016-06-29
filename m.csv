@@ -1,0 +1,6 @@
+"Start","Start.date","Start.time","Actual.Mins","Comment","Type.of.maintenance","Start.1","New.Event","Old.Event"
+2015-01-25 06:00:00,"25/01/2015","06:00",39480s (~658 minutes),"Debris Problems","Unplanned",2015-01-25 06:00:00,TRUE,FALSE
+2015-01-25 16:58:00,"25/01/2015","16:58",3720s (~62 minutes),"cracked casing","Unplanned",2015-01-25 16:58:00,FALSE,FALSE
+2015-01-25 18:00:00,"25/01/2015","18:00",7680s (~128 minutes),"motor brush problems","Unplanned",2015-01-25 18:00:00,FALSE,FALSE
+2015-02-19 05:47:00,"19/02/2015","05:47",780s (~13 minutes),"CFP failure","Unplanned",2015-02-19 05:47:00,TRUE,FALSE
+2015-02-19 06:00:00,"19/02/2015","06:00",43200s (~720 minutes),"CFP failure","Unplanned",2015-02-19 06:00:00,TRUE,TRUE
